@@ -34,15 +34,14 @@ const requestHandler = createRequestHandler(
 type AppType = {
     Bindings: Env
 }
-const app = new Hono<AppType>()
 
 function createSuperMemory(userId: string, env: Env) {
-
+    const userApp = new Hono<AppType>()
     const supermemory = new Supermemory({
         apiKey: env.SUPERMEMORY_API_KEY,
     })
 
-    app.post(
+    userApp.post(
         "/supermemory-prompt",
         describePrompt({
             name: "Supermemory Prompt",
@@ -82,9 +81,9 @@ function createSuperMemory(userId: string, env: Env) {
         async (c) => {
             const { thingToRemember } = c.req.valid("json")
 
-            if (!userId) {
+            if (!userId || !isValidUserId(userId)) {
                 return c.json<ToolResponseType>(
-                    [{ type: "text", text: "User ID is required" }],
+                    [{ type: "text", text: "User ID validation failed" }],
                     400,
                 )
             }
@@ -93,14 +92,6 @@ function createSuperMemory(userId: string, env: Env) {
                 containerTags: [userId],
             })
 
-
-            const { memories: memoryList } = await supermemory.memories.list({
-                containerTags: [userId],
-            })
-
-            console.log(memories)
-
-            // if memories.length is more than 2000, reject with error.
             if (memories.length > 2000) {
                 return c.json<ToolResponseType>(
                     [
@@ -127,7 +118,7 @@ function createSuperMemory(userId: string, env: Env) {
         },
     )
 
-    app.post(
+    userApp.post(
         "/search",
         describeTool({
             name: "searchSupermemory",
@@ -143,7 +134,13 @@ function createSuperMemory(userId: string, env: Env) {
         async (c) => {
             const { informationToGet } = c.req.valid("json")
 
-            console.log("SEARCHING WITH USER ID", userId)
+            if (!userId || !isValidUserId(userId)) {
+                return c.json<ToolResponseType>(
+                    [{ type: "text", text: "User ID validation failed" }],
+                    400,
+                )
+            }
+
             const response = await supermemory.search.execute({
                 q: informationToGet,
                 containerTags: [userId],
@@ -160,34 +157,107 @@ function createSuperMemory(userId: string, env: Env) {
         },
     )
 
-    return app
+    // SECURITY FIX: Return user-scoped app instance instead of global app
+    return userApp
+}
+
+/**
+ * User context for secure isolation
+ */
+interface UserContext {
+    userId: string
+    createdAt: Date
+    lastAccessed: Date
 }
 
 export class MyDurableObject extends DurableObject<Env> {
-    transport?: SSEHonoTransport
+    private userContext?: UserContext
+    private transport?: SSEHonoTransport
 
-    override async fetch(request: Request) {
-        const url = new URL(request.url)
-        const userId = url.pathname.split("/")[1] // Get userId from path
+    /**
+     * Validate and establish user context with security checks
+     */
+    private async validateAndSetUserContext(requestUserId: string): Promise<void> {
+        // Get stored user context from durable storage
+        const storedContext = await this.ctx.storage.get<UserContext>("userContext")
 
-        // Initialize transport if not exists
+        if (storedContext) {
+            // SECURITY CHECK: Verify the requesting user matches the DO's assigned user
+            if (storedContext.userId !== requestUserId) {
+                throw new Error(`Security violation: User context mismatch. Expected ${storedContext.userId}, got ${requestUserId}`)
+            }
+
+            // Update last accessed time
+            storedContext.lastAccessed = new Date()
+            this.userContext = storedContext
+            await this.ctx.storage.put("userContext", storedContext)
+        } else {
+            // First time initialization for this user
+            this.userContext = {
+                userId: requestUserId,
+                createdAt: new Date(),
+                lastAccessed: new Date()
+            }
+            await this.ctx.storage.put("userContext", this.userContext)
+        }
+    }
+
+    /**
+     * Get or create user-scoped transport instance
+     */
+    private getOrCreateTransport(userId: string): SSEHonoTransport {
         if (!this.transport) {
             this.transport = new SSEHonoTransport(
                 `/${userId}/messages`,
                 this.ctx.id.toString(),
             )
         }
+        return this.transport
+    }
+
+    override async fetch(request: Request) {
+        const url = new URL(request.url)
+        const requestUserId = url.pathname.split("/")[1] // Get userId from path
+
+        // SECURITY VALIDATION: Ensure userId is present and valid
+        if (!requestUserId || !isValidUserId(requestUserId)) {
+            return new Response("Invalid or missing userId in request path", {
+                status: 400,
+                headers: { "Content-Type": "text/plain" }
+            })
+        }
+
+        try {
+            await this.validateAndSetUserContext(requestUserId)
+            this.getOrCreateTransport(requestUserId)
+        } catch (error) {
+            return new Response(`Security validation failed: ${error instanceof Error ? error.message : String(error)}`, {
+                status: 403,
+                headers: { "Content-Type": "text/plain" }
+            })
+        }
+        // Create user-scoped server with strict validation
         const server = new Hono<{
             Bindings: Env & { transport: SSEHonoTransport }
-            Variables: { userId: string }
+            Variables: { userId: string; userContext: UserContext }
         }>()
             .basePath("/:userId")
             .use(async (c, next) => {
                 const userId = c.req.param("userId")
-                if (!userId) {
-                    return c.json({ error: "User ID is required" }, 400)
+
+                // SECURITY CHECK: Validate userId parameter
+                if (!userId || !isValidUserId(userId)) {
+                    return c.json({ error: "Invalid or missing user ID" }, 400)
                 }
+
+                // SECURITY CHECK: Ensure userId matches the validated context
+                if (userId !== this.userContext?.userId) {
+                    console.error(`Security violation: URL userId ${userId} does not match context userId ${this.userContext?.userId}`)
+                    return c.json({ error: "User context validation failed" }, 403)
+                }
+
                 c.set("userId", userId)
+                c.set("userContext", this.userContext)
                 await next()
             })
             .use(
@@ -209,7 +279,6 @@ export class MyDurableObject extends DurableObject<Env> {
                         version: "1.0.0",
                     }),
                     transport: c.env.transport,
-                    // logger: logger,
                 })
             })
         })
@@ -237,6 +306,27 @@ export class MyDurableObject extends DurableObject<Env> {
     }
 }
 
+/**
+ * Extract userId from URL path for user-scoped routing
+ * Expected format: /userId/sse or /userId/messages
+ */
+function extractUserIdFromPath(pathname: string): string | null {
+    const pathParts = pathname.split("/").filter(Boolean)
+    if (pathParts.length >= 2 && (pathParts[1] === "sse" || pathParts[1] === "messages")) {
+        return pathParts[0]
+    }
+    return null
+}
+
+/**
+ * Validate userId format to prevent injection attacks
+ */
+function isValidUserId(userId: string): boolean {
+    // nanoid generates URL-safe characters: A-Za-z0-9_-
+    // Typical length is 21 characters
+    return /^[A-Za-z0-9_-]{10,50}$/.test(userId)
+}
+
 export default {
     async fetch(request: Request, env: Env, ctx: ExecutionContext) {
         const url = new URL(request.url)
@@ -245,19 +335,30 @@ export default {
             url.pathname.includes("sse") ||
             url.pathname.endsWith("/messages")
         ) {
-            const sessionId = url.searchParams.get("sessionId")
+            // SECURITY FIX: Extract userId from path for user-scoped DO routing
+            const userId = extractUserIdFromPath(url.pathname)
+
+            if (!userId) {
+                return new Response("Invalid request: userId not found in path", {
+                    status: 400,
+                    headers: { "Content-Type": "text/plain" }
+                })
+            }
+
+            if (!isValidUserId(userId)) {
+                return new Response("Invalid request: malformed userId", {
+                    status: 400,
+                    headers: { "Content-Type": "text/plain" }
+                })
+            }
 
             const namespace = env.MY_DO
 
-            let stub: DurableObjectStub<MyDurableObject>
+            // SECURITY FIX: Use userId to create deterministic, user-scoped DO instances
+            // This ensures each user gets their own isolated DO instance
+            const id = namespace.idFromName(`user-${userId}`)
+            const stub = namespace.get(id) as DurableObjectStub<MyDurableObject>
 
-            if (sessionId) {
-                const id = namespace.idFromString(sessionId)
-                stub = namespace.get(id) as DurableObjectStub<MyDurableObject>
-            } else {
-                const id = namespace.newUniqueId()
-                stub = namespace.get(id) as DurableObjectStub<MyDurableObject>
-            }
             return stub.fetch(request)
         }
 
