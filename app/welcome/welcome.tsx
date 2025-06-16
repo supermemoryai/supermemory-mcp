@@ -1,5 +1,5 @@
 import type { MemoryListResponse } from "@supermemory/sdk/resources/memory.mjs"
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useState, useRef } from "react"
 import { useFetcher } from "react-router"
 import logoMark from "./logomark.svg"
 
@@ -32,6 +32,9 @@ export function Welcome({
     const [isRefreshing, setIsRefreshing] = useState<boolean>(false)
     const [restoreUrl, setRestoreUrl] = useState<string>("")
     const [isRestoring, setIsRestoring] = useState<boolean>(false)
+    const [isExporting, setIsExporting] = useState<boolean>(false)
+    const [exportError, setExportError] = useState<string | null>(null)
+    const exportDropdownRef = useRef<HTMLDivElement>(null)
     const fetcher = useFetcher()
 
     // Create a function to fetch data
@@ -65,8 +68,8 @@ export function Welcome({
             .then(() => {
                 console.log(fetcher.data)
                 if (fetcher.data.success === true) {
-                    setMemories((prev) =>
-                        prev.filter((memory) => memory.id !== memoryId),
+                    setMemories((prev :any) =>
+                        prev.filter((memory :any) => memory.id !== memoryId),
                     )
                 }
             })
@@ -141,8 +144,8 @@ export function Welcome({
             .then(() => {
                 if (fetcher.data.success) {
                     // Update the memory in the local state
-                    setMemories((prev) =>
-                        prev.map((memory) =>
+                    setMemories((prev:any) =>
+                        prev.map((memory:any) =>
                             memory.id === memoryId
                                 ? { ...memory, title: editedTitle.trim() }
                                 : memory,
@@ -155,6 +158,79 @@ export function Welcome({
             })
     }
 
+    // Handle click outside to close dropdown
+    useEffect(() => {
+        function handleClickOutside(event: MouseEvent) {
+            if (exportDropdownRef.current && !exportDropdownRef.current.contains(event.target as Node)) {
+                setExportError(null);
+            }
+        }
+        document.addEventListener("mousedown", handleClickOutside);
+        return () => document.removeEventListener("mousedown", handleClickOutside);
+    }, []);
+
+    const handleExport = async (format: "json" | "csv") => {
+        if (!memories || memories.length === 0) {
+            setExportError("No memories to export");
+            return;
+        }
+
+        setIsExporting(true);
+        setExportError(null);
+
+        let blobUrl: string | null = null;
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+
+            const res = await fetch("/?index", {
+                method: "POST",
+                body: (() => {
+                    const fd = new FormData();
+                    fd.append("userId", userId);
+                    fd.append("action", "export");
+                    fd.append("format", format);
+                    return fd;
+                })(),
+                signal: controller.signal,
+            });
+
+            clearTimeout(timeoutId);
+
+            if (!res.ok) {
+                const errorData :any = await res.json().catch(() => ({ error: "Unknown error" }));
+                throw new Error(errorData.error || `HTTP error! status: ${res.status}`);
+            }
+
+            const blob = await res.blob();
+            if (blob.size === 0) {
+                throw new Error("Received empty file");
+            }
+
+            // Clean up any existing blob URL
+            if (blobUrl) {
+                URL.revokeObjectURL(blobUrl);
+            }
+
+            blobUrl = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = blobUrl;
+            a.download = `memories-${userId}-${new Date().toISOString()}.${format}`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        } catch (error) {
+            console.error("Export error:", error);
+            setExportError(error instanceof Error ? error.message : "Failed to export memories");
+        } finally {
+            setIsExporting(false);
+            // Clean up blob URL after a delay to ensure download has started
+            if (blobUrl) {
+                setTimeout(() => URL.revokeObjectURL(blobUrl!), 1000);
+            }
+        }
+    };
+
     useEffect(() => {
         fetchMemories()
     }, [])
@@ -162,7 +238,7 @@ export function Welcome({
     // Countdown timer effect
     useEffect(() => {
         const timer = setInterval(() => {
-            setCountdown((prev) => {
+            setCountdown((prev:any) => {
                 if (prev <= 1) {
                     fetchMemories()
                     return 30
@@ -575,6 +651,69 @@ export function Welcome({
                                         <span className="bg-gradient-to-r from-blue-600 to-cyan-600 text-white text-xs font-medium px-3 py-1.5 rounded-full shadow-lg">
                                             {memories.length} items
                                         </span>
+                                        {/* Export Button Dropdown */}
+                                        <div className="relative group" ref={exportDropdownRef}>
+                                            <button
+                                                type="button"
+                                                disabled={isExporting || memories.length === 0}
+                                                className={`bg-blue-600/80 hover:bg-blue-700/90 text-white text-xs font-medium px-3 py-1.5 rounded-full shadow-lg flex items-center gap-1 focus:outline-none focus:ring-2 focus:ring-blue-400 disabled:opacity-50 disabled:cursor-not-allowed ${
+                                                    isExporting ? 'animate-pulse' : ''
+                                                }`}
+                                                aria-label={isExporting ? "Exporting memories..." : "Export memories"}
+                                            >
+                                                {isExporting ? (
+                                                    <>
+                                                        <svg className="animate-spin h-4 w-4 mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                                        </svg>
+                                                        Exporting...
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" className="inline-block mr-1" aria-hidden="true">
+                                                            <path d="M12 16v-8m0 8l-4-4m4 4l4-4" strokeLinecap="round" strokeLinejoin="round"/>
+                                                            <rect x="4" y="4" width="16" height="16" rx="2" strokeLinecap="round" strokeLinejoin="round"/>
+                                                        </svg>
+                                                        Export
+                                                    </>
+                                                )}
+                                            </button>
+                                            <div 
+                                                className={`absolute right-0 mt-2 w-36 bg-slate-800 border border-white/10 rounded-lg shadow-lg transition-all duration-200 z-50 ${
+                                                    isExporting ? 'opacity-50 pointer-events-none' : 'opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto'
+                                                }`}
+                                                role="menu"
+                                                aria-label="Export options"
+                                            >
+                                                <button
+                                                    type="button"
+                                                    disabled={isExporting}
+                                                    className="block w-full text-left px-4 py-2 text-sm text-white/80 hover:bg-blue-600/20 rounded-t-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                                                    onClick={() => handleExport("json")}
+                                                    role="menuitem"
+                                                >
+                                                    Export as JSON
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    disabled={isExporting}
+                                                    className="block w-full text-left px-4 py-2 text-sm text-white/80 hover:bg-blue-600/20 rounded-b-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                                                    onClick={() => handleExport("csv")}
+                                                    role="menuitem"
+                                                >
+                                                    Export as CSV
+                                                </button>
+                                            </div>
+                                            {exportError && (
+                                                <div 
+                                                    className="absolute right-0 mt-2 w-64 bg-red-500/20 border border-red-500/30 rounded-lg p-3 text-sm text-red-400"
+                                                    role="alert"
+                                                >
+                                                    {exportError}
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
                                 </div>
 

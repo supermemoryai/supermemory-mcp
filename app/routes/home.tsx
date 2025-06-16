@@ -315,6 +315,78 @@ export async function action({
                 )
             }
 
+            case "export": {
+                const format = formData.get("format") as string;
+                if (!format || (format !== "json" && format !== "csv")) {
+                    return data({ error: "Invalid export format" }, { status: 400 });
+                }
+
+                try {
+                    const memories = (
+                        await supermemory.memories.list({
+                            limit: "2000",
+                            containerTags: [userId],
+                        })
+                    ).memories;
+
+                    // Handle empty memories array
+                    if (!memories || memories.length === 0) {
+                        return data({ error: "No memories to export" }, { status: 404 });
+                    }
+
+                    let fileContent: string;
+                    let contentType: string;
+                    let fileName: string;
+
+                    // Sanitize filename
+                    const sanitizedUserId = userId.replace(/[^a-zA-Z0-9-_]/g, '_');
+                    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+
+                    if (format === "json") {
+                        fileContent = JSON.stringify(memories, null, 2);
+                        contentType = "application/json";
+                        fileName = `memories-${sanitizedUserId}-${timestamp}.json`;
+                    } else {
+                        // CSV export with proper escaping and type handling
+                        const headers = Object.keys(memories[0] || {});
+                        const csvRows = [
+                            headers.join(","),
+                            ...memories.map(m => 
+                                headers.map(header => {
+                                    const value = m[header as keyof typeof m];
+                                    if (value === null || value === undefined) return '""';
+                                    const stringValue = String(value);
+                                    // Properly escape quotes and handle special characters
+                                    return `"${stringValue.replace(/"/g, '""').replace(/[\n\r]/g, ' ')}"`;
+                                }).join(",")
+                            )
+                        ];
+                        fileContent = csvRows.join("\n");
+                        contentType = "text/csv";
+                        fileName = `memories-${sanitizedUserId}-${timestamp}.csv`;
+                    }
+
+                    // Set appropriate headers for file download
+                    return new Response(fileContent, {
+                        status: 200,
+                        headers: {
+                            "Content-Type": contentType,
+                            "Content-Disposition": `attachment; filename="${fileName}"`,
+                            "Cache-Control": "no-cache, no-store, must-revalidate",
+                            "Pragma": "no-cache",
+                            "Expires": "0",
+                            "Content-Length": Buffer.byteLength(fileContent).toString(),
+                        },
+                    });
+                } catch (error) {
+                    console.error("Error exporting memories:", error);
+                    return data(
+                        { error: `Error exporting memories: ${error instanceof Error ? error.message : String(error)}` },
+                        { status: 500 },
+                    );
+                }
+            }
+
             default:
                 return data({ error: "Invalid action type" }, { status: 400 })
         }
