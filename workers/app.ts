@@ -95,13 +95,13 @@ function createSuperMemory(userId: string, env: Env) {
                     containerTags: [userId],
                 })
 
-                // if memories.length is more than 2000, reject with error.
-                if (memories.length > 2000) {
+                // if memories.length is more than 1100, reject with error.
+                if (memories.length > 1100) {
                     return c.json<ToolResponseType>(
                         [
                             {
                                 type: "text",
-                                text: "Memory limit of 2000 memories exceeded",
+                                text: "Memory limit of 1100 memories exceeded",
                             },
                         ],
                         400,
@@ -204,7 +204,7 @@ function createSuperMemory(userId: string, env: Env) {
                     {
                         type: "text",
                         text: `${response.results.length > 0 ? response.results.map((r) =>
-                            r.chunks.map((c) => c.content).join("\n\n"),
+                            `ID: ${(r as any).documentId}\nContent: ${r.chunks.map((c) => c.content).join("\n\n")}`
                         ).join("\n---\n") : "No results found."}`,
                     },
                 ])
