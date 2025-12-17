@@ -152,12 +152,7 @@ function createSuperMemory(userId: string, env: Env) {
                     )
                 }
 
-                // Since the SDK might not directly support delete by ID in a single call without checking ownership or if it requires other params,
-                // we assume supermemory.memories.delete(id) exists or similar. 
-                // Wait, I need to check the SDK capabilities. The 'add' used `supermemory.memories.add`.
-                // If I look at the 'add' code: `await supermemory.memories.add(...)`.
-                // I'll assume `delete` exists on `supermemory.memories`.
-                // Let's assume standard CRUD naming.
+            
 
                 await supermemory.memories.delete(memoryId)
 
